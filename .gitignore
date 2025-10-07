@@ -1,17 +1,7 @@
-# Node/Python basics (even if not used)
-node_modules/
 __pycache__/
 *.pyc
-
-# Docker
-*.tar
-
-# Terraform
 .terraform/
 .terraform.lock.hcl
-terraform.tfstate
-terraform.tfstate.*
-crash.log
-
-# Local env files
+terraform.tfstate*
 .env
+node_modules/
