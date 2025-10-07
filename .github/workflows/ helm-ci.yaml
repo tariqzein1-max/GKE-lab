@@ -21,7 +21,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
       - name: Install deps
         working-directory: app
         run: |
@@ -29,7 +30,9 @@ jobs:
           pip install -r requirements.txt pytest
       - name: Run pytest
         working-directory: app
-        run: pytest -q
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q
 
   helm-deploy:
     needs: [unit-tests]
@@ -37,7 +40,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # OIDC → short-lived creds as gh-deployer
       - name: Auth to Google Cloud (OIDC)
         uses: google-github-actions/auth@v2
         with:
@@ -47,7 +49,6 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      # Required for kubectl to use gcloud creds
       - name: Install GKE gcloud auth plugin
         run: |
           gcloud components install gke-gcloud-auth-plugin --quiet || true
@@ -59,7 +60,6 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
 
-      # Build & push the image
       - name: Build & push image
         working-directory: app
         run: |
@@ -70,7 +70,6 @@ jobs:
           docker build -t "$IMAGE_REPO:$IMAGE_TAG" .
           docker push "$IMAGE_REPO:$IMAGE_TAG"
 
-      # Get kube credentials (plugin-aware)
       - name: Get GKE credentials
         uses: google-github-actions/get-gke-credentials@v2
         with:
@@ -90,12 +89,8 @@ jobs:
           helm upgrade --install hello charts/hello \
             --namespace "${{ env.NAMESPACE }}" \
             --set image.repository="${IMAGE_REPO}" \
-            --set image.tag="${IMAGE_TAG}"
-
-      - name: Wait for rollout
-        run: |
-          kubectl rollout status deploy/hello -n "${{ env.NAMESPACE }}" --timeout=300s
-          kubectl get deploy,po -n "${{ env.NAMESPACE }}" -o wide
+            --set image.tag="${IMAGE_TAG}" \
+            --wait --timeout 5m
 
       - name: Wait for Service external IP
         run: |
@@ -113,7 +108,6 @@ jobs:
 
       - name: Smoke test (content check)
         run: |
-          echo "Hitting http://$LB_IP/ ..."
           for i in {1..15}; do
             BODY=$(curl -fsS --max-time 5 "http://$LB_IP/" || true)
             echo "$BODY"
