@@ -1,0 +1,5 @@
+project_id   = "gke-lab-474404"
+region       = "us-central1"
+cluster_name = "gke-lab"
+ar_repo      = "apps"
+github_repo  = "tariqzein1-max/GKE-lab"

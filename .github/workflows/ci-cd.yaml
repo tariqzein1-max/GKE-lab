@@ -1,0 +1,74 @@
+name: ci
+on:
+  push:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+env:
+  PROJECT_ID: gke-lab-474404
+  REGION: us-central1
+  AR_REPO: apps
+  CLUSTER_NAME: gke-lab
+  NAMESPACE: app
+  IMAGE_NAME: hello
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # OIDC: exchange GitHub token for short-lived GCP creds to impersonate gh-deployer SA
+      - name: Auth to Google Cloud (OIDC)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}   # projects/NNN/.../providers/github-provider
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}               # gh-deployer@gke-lab-474404.iam.gserviceaccount.com
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Who am I
+        run: |
+          gcloud config list
+          gcloud auth list
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build & push image
+        working-directory: app
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials "${{ env.CLUSTER_NAME }}" \
+            --region "${{ env.REGION }}" --project "${{ env.PROJECT_ID }}"
+
+      - name: Create namespace (idempotent)
+        run: |
+          kubectl get ns "${{ env.NAMESPACE }}" || kubectl create ns "${{ env.NAMESPACE }}"
+
+      - name: Render and apply manifests
+        run: |
+          sudo apt-get update && sudo apt-get install -y gettext-base
+          export IMAGE="${{ env.IMAGE }}"
+          envsubst < k8s/deployment.tmpl.yaml > k8s/deployment.yaml
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -n "${{ env.NAMESPACE }}" -f k8s/deployment.yaml
+          kubectl apply -n "${{ env.NAMESPACE }}" -f k8s/service.yaml
+
+      - name: Wait for rollout & show Service
+        run: |
+          kubectl rollout status deployment/hello -n "${{ env.NAMESPACE }}" --timeout=180s
+          kubectl get svc -n "${{ env.NAMESPACE }}" -o wide
