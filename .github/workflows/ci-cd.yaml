@@ -7,7 +7,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  id-token: write   # required for OIDC
+  id-token: write     # required for OIDC
   contents: read
 
 env:
@@ -24,12 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # OIDC: exchange GitHub token for short-lived GCP creds to impersonate gh-deployer SA
+      # OIDC: short-lived credentials, no JSON keys
       - name: Auth to Google Cloud (OIDC)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}   # projects/NNN/.../providers/github-provider
-          service_account: ${{ secrets.GCP_DEPLOYER_SA }}               # gh-deployer@gke-lab-474404.iam.gserviceaccount.com
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}  # projects/NNN/.../providers/github-provider
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}              # gh-deployer@gke-lab-474404.iam.gserviceaccount.com
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -46,7 +46,7 @@ jobs:
         working-directory: app
         run: |
           IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV        # <-- makes IMAGE available to later steps
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
 
@@ -55,20 +55,20 @@ jobs:
           gcloud container clusters get-credentials "${{ env.CLUSTER_NAME }}" \
             --region "${{ env.REGION }}" --project "${{ env.PROJECT_ID }}"
 
-      - name: Create namespace (idempotent)
+      - name: Create/ensure namespace
         run: |
-          kubectl get ns "${{ env.NAMESPACE }}" || kubectl create ns "${{ env.NAMESPACE }}"
+          kubectl apply -f k8s/namespace.yaml
+          kubectl get ns "${{ env.NAMESPACE }}"
 
       - name: Render and apply manifests
         run: |
-          sudo apt-get update && sudo apt-get install -y gettext-base
-          export IMAGE="${{ env.IMAGE }}"
+          sudo apt-get update && sudo apt-get install -y gettext-base   # for envsubst
+          echo "Using image: $IMAGE"
           envsubst < k8s/deployment.tmpl.yaml > k8s/deployment.yaml
-          kubectl apply -f k8s/namespace.yaml
           kubectl apply -n "${{ env.NAMESPACE }}" -f k8s/deployment.yaml
           kubectl apply -n "${{ env.NAMESPACE }}" -f k8s/service.yaml
 
       - name: Wait for rollout & show Service
         run: |
           kubectl rollout status deployment/hello -n "${{ env.NAMESPACE }}" --timeout=180s
-          kubectl get svc -n "${{ env.NAMESPACE }}" -o wide
+          kubectl get deploy,po,svc -n "${{ env.NAMESPACE }}" -o wide
