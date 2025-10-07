@@ -7,7 +7,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  id-token: write     # required for OIDC
+  id-token: write
   contents: read
 
 env:
@@ -17,6 +17,8 @@ env:
   CLUSTER_NAME: gke-lab
   NAMESPACE: app
   IMAGE_NAME: hello
+  # Tell kubectl/client-go to use the plugin
+  USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
 
 jobs:
   build-and-deploy:
@@ -24,15 +26,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # OIDC: short-lived credentials, no JSON keys
+      # OIDC auth (no JSON key)
       - name: Auth to Google Cloud (OIDC)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}  # projects/NNN/.../providers/github-provider
-          service_account: ${{ secrets.GCP_DEPLOYER_SA }}              # gh-deployer@gke-lab-474404.iam.gserviceaccount.com
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
+
+      # 🔧 Install the GKE auth plugin (required by kubectl)
+      - name: Install GKE gcloud auth plugin
+        run: |
+          if ! command -v gke-gcloud-auth-plugin >/dev/null 2>&1; then
+            gcloud components install gke-gcloud-auth-plugin --quiet || true
+          fi
+          if ! command -v gke-gcloud-auth-plugin >/dev/null 2>&1; then
+            # fallback via apt if components are unavailable
+            sudo apt-get update
+            sudo apt-get install -y apt-transport-https ca-certificates gnupg
+            echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
+            curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+            sudo apt-get update
+            sudo apt-get install -y google-cloud-sdk-gke-gcloud-auth-plugin
+          fi
+          gke-gcloud-auth-plugin --version || true
 
       - name: Who am I
         run: |
@@ -46,14 +65,17 @@ jobs:
         working-directory: app
         run: |
           IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-          echo "IMAGE=$IMAGE" >> $GITHUB_ENV        # <-- makes IMAGE available to later steps
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
 
+      # ✅ Fetch kube credentials (now that plugin is present)
       - name: Get GKE credentials
-        run: |
-          gcloud container clusters get-credentials "${{ env.CLUSTER_NAME }}" \
-            --region "${{ env.REGION }}" --project "${{ env.PROJECT_ID }}"
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.CLUSTER_NAME }}
+          location: ${{ env.REGION }}
+          project_id: ${{ env.PROJECT_ID }}
 
       - name: Create/ensure namespace
         run: |
@@ -62,7 +84,7 @@ jobs:
 
       - name: Render and apply manifests
         run: |
-          sudo apt-get update && sudo apt-get install -y gettext-base   # for envsubst
+          sudo apt-get update && sudo apt-get install -y gettext-base
           echo "Using image: $IMAGE"
           envsubst < k8s/deployment.tmpl.yaml > k8s/deployment.yaml
           kubectl apply -n "${{ env.NAMESPACE }}" -f k8s/deployment.yaml
