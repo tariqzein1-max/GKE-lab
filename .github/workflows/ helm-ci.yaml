@@ -68,7 +68,7 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ✅ Build & push with official action + GHA cache
+      # Build & push with official action + GHA cache
       - name: Build & push with cache
         uses: docker/build-push-action@v6
         with:
@@ -80,7 +80,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Install Syft only (SBOM)
+      # SBOM
       - name: Install Syft
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
@@ -96,6 +96,7 @@ jobs:
           name: sbom-${{ github.sha }}
           path: sbom.json
 
+      # Trivy scan
       - name: Trivy scan (fail on CRITICAL)
         uses: aquasecurity/trivy-action@0.19.0
         with:
@@ -129,31 +130,45 @@ jobs:
             --wait --timeout 5m
 
       - name: Wait for Service external IP
+        shell: bash
         run: |
-          for i in {1..60}; do
+          set -euo pipefail
+          echo "Waiting for External IP on Service/app/hello ..."
+          for i in {1..120}; do
             IP=$(kubectl get svc hello -n "${{ env.NAMESPACE }}" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
-            if [ -n "$IP" ]; then
+            if [[ -n "${IP:-}" ]]; then
               echo "LB_IP=$IP" >> $GITHUB_ENV
-              echo "LB IP: $IP"
+              echo "Got IP: $IP"
               exit 0
             fi
-            echo "Waiting for LoadBalancer IP..."
+            echo "[$i/120] still pending..."
             sleep 10
           done
-          echo "No LB IP assigned in time"; exit 1
+          echo "No IP assigned in time."
+          kubectl describe svc hello -n "${{ env.NAMESPACE }}" || true
+          kubectl get events -n "${{ env.NAMESPACE }}" --sort-by=.lastTimestamp | tail -n 50 || true
+          exit 1
 
       - name: Smoke test (content check)
+        shell: bash
         run: |
+          set -euo pipefail
+          if [[ -z "${LB_IP:-}" ]]; then
+            echo "LB_IP is empty"; exit 1
+          fi
+          echo "Hitting http://$LB_IP/ ..."
           for i in {1..15}; do
-            BODY=$(curl -fsS --max-time 5 "http://$LB_IP/" || true)
-            echo "$BODY"
-            if echo "$BODY" | grep -q "Hello from GKE Autopilot"; then
-              echo "Smoke test OK"; exit 0
-            fi>
-            echo "Retrying..."
+            STATUS=$(curl -sS -o /tmp/body -w "%{http_code}" --max-time 5 "http://$LB_IP/" || true)
+            cat /tmp/body || true
+            if [[ "$STATUS" == "200" ]] && grep -q "Hello from GKE Autopilot" /tmp/body; then
+              echo "Smoke test OK"
+              exit 0
+            fi
+            echo "[$i/15] retrying..."
             sleep 5
           done
-          echo "Smoke test failed"; exit 1
+          echo "Smoke test failed"
+          exit 1
 
       - name: Show endpoints
         run: kubectl get svc -n "${{ env.NAMESPACE }}" -o wide
