@@ -84,14 +84,12 @@ jobs:
             --push .
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
           
-      - name: Install Syft & Trivy
+      # Install Syft only (SBOM)
+      - name: Install Syft
         run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg
-          wget -qO- https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg >/dev/null
-          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb stable main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update && sudo apt-get install -y trivy
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+          | sh -s -- -b /usr/local/bin
+          syft --version
 
       - name: SBOM (syft)
         run: syft "$IMAGE_REPO:$IMAGE_TAG" -o json > sbom.json || true
@@ -101,9 +99,15 @@ jobs:
         with:
           name: sbom-${{ github.sha }}
           path: sbom.json
-
       - name: Trivy scan (fail on CRITICAL)
-        run: trivy image --timeout 10m --ignore-unfixed --exit-code 1 --severity CRITICAL "$IMAGE_REPO:$IMAGE_TAG"
+        uses: aquasecurity/trivy-action@0.19.0
+        with:
+          image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          format: 'table'
+          vuln-type: 'os,library'
+          ignore-unfixed: true
+          severity: 'CRITICAL'
+          exit-code: '1'
 
 
       - name: Get GKE credentials
