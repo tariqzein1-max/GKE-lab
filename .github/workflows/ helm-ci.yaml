@@ -83,6 +83,27 @@ jobs:
             -t "$IMAGE_REPO:$IMAGE_TAG" -t "$IMAGE_REPO:latest" \
             --push .
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          
+      - name: Install Syft & Trivy
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          wget -qO- https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg >/dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb stable main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update && sudo apt-get install -y trivy
+
+      - name: SBOM (syft)
+        run: syft "$IMAGE_REPO:$IMAGE_TAG" -o json > sbom.json || true
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.json
+
+      - name: Trivy scan (fail on CRITICAL)
+        run: trivy image --timeout 10m --ignore-unfixed --exit-code 1 --severity CRITICAL "$IMAGE_REPO:$IMAGE_TAG"
 
 
       - name: Get GKE credentials
